@@ -152,4 +152,6 @@ This application was pivoted from a "dead repository finder" to an "inspiration 
 - **Technology Stack Analysis**: Automatic detection and comparison of tech stacks
 - **Community Insights**: Integration with GitHub discussions and issues
 - **Personalized Recommendations**: User preference learning and customization
-- **Visual Analytics**: Charts and graphs showing repository trends and patterns 
+- **Visual Analytics**: Charts and graphs showing repository trends and patterns
+
+Copyright © 2025 Vansh Sinha. All rights reserved.
