@@ -1,0 +1,25 @@
+{
+  "name": "Code Graveyard API",
+  "description": "Professional API for discovering GitHub repositories - find inspiration from active projects OR learn from abandoned code graveyards",
+  "repository": "https://github.com/yourusername/codeinspiration-api",
+  "logo": "https://node-js-sample.herokuapp.com/node.png",
+  "keywords": ["github", "api", "repositories", "development", "ai"],
+  "image": "heroku/python",
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "env": {
+    "GITHUB_TOKEN": {
+      "description": "GitHub API token for higher rate limits (optional)",
+      "required": false
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}
