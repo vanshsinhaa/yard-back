@@ -11,37 +11,9 @@ from typing import List, Optional, Dict
 import uvicorn
 import time
 import requests
-import os
 
 # Import our authentication system
 from auth_system import get_api_key, get_optional_api_key, api_key_manager
-# Import secure key manager for production keys
-from secure_key_manager import secure_key_manager
-
-# Hybrid authentication function
-async def get_hybrid_api_key(request):
-    """Support both demo keys and secure production keys"""
-    api_key = request.headers.get("x-api-key") or request.headers.get("X-API-Key")
-    
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-    
-    # Check if it's a secure production key (starts with cg_live_)
-    if api_key.startswith('cg_live_'):
-        user_data = secure_key_manager.validate_key(api_key)
-        if user_data:
-            # Increment usage for secure keys
-            secure_key_manager.increment_usage(api_key)
-            return user_data
-        else:
-            raise HTTPException(status_code=401, detail="Invalid secure API key")
-    
-    # Fall back to demo keys for testing
-    else:
-        try:
-            return await get_api_key(request)
-        except:
-            raise HTTPException(status_code=401, detail="Invalid API key")
 
 # Models
 class SearchRequest(BaseModel):
@@ -59,10 +31,6 @@ class SearchResponse(BaseModel):
     search_mode: str
     plan: str
     usage: dict
-
-class KeyGenerationRequest(BaseModel):
-    plan: str = Field(..., description="Plan type: free, pro, or enterprise")
-    user_email: str = Field(..., description="User email address")
 
 # Real GitHub Service (same as before)
 class GitHubService:
@@ -237,8 +205,8 @@ async def root():
             "enterprise": "10,000 requests/hour, 100,000/month"
         },
         "demo_keys": {
-            "note": "Demo keys removed for security. Use production_api.py for secure keys.",
-            "get_keys": "POST /generate-key with admin access"
+            "free": "demo_free_12345",
+            "pro": "pro_key_67890"
         }
     }
 
@@ -255,7 +223,7 @@ async def health():
 @app.post("/search", response_model=SearchResponse)
 async def search_repositories(
     request: SearchRequest,
-    user_data: Dict = Depends(get_hybrid_api_key)
+    user_data: Dict = Depends(get_api_key)
 ):
     """Search for REAL GitHub repositories (requires API key)"""
     start_time = time.time()
@@ -381,36 +349,6 @@ async def get_plans():
         }
     }
 
-@app.post("/generate-key")
-async def generate_api_key(request: KeyGenerationRequest, admin_key: str = None):
-    """Generate new API key (admin endpoint - requires admin authentication)"""
-    
-    # Check admin authentication
-    if admin_key != os.environ.get('ADMIN_KEY', 'admin_secret_123'):
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    try:
-        api_key = secure_key_manager.generate_api_key(
-            plan=request.plan,
-            user_email=request.user_email
-        )
-        
-        return {
-            "success": True,
-            "api_key": api_key,
-            "plan": request.plan,
-            "user_email": request.user_email,
-            "message": "API key generated successfully",
-            "usage_instructions": {
-                "header": "X-API-Key",
-                "value": api_key,
-                "example": f"curl -H 'X-API-Key: {api_key}' https://your-api.com/search"
-            }
-        }
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Key generation failed: {e}")
-
 if __name__ == "__main__":
     import os
     
@@ -423,12 +361,12 @@ if __name__ == "__main__":
     print(f"📚 Docs: http://{host}:{port}/docs")
     print(f"🔍 Health: http://{host}:{port}/health")
     print()
-    print("🔑 API Keys:")
-    print("   Use production_api.py for secure key generation")
-    print("   No demo keys in production version")
+    print("🔑 Demo API Keys:")
+    print("   FREE: demo_free_12345")
+    print("   PRO:  pro_key_67890")
     print()
     print("📋 Usage:")
-    print("   Add header: X-API-Key: [your-secure-key]")
+    print("   Add header: X-API-Key: demo_free_12345")
     print("   search_mode: 'active', 'graveyard', or 'all'")
     print()
     print("💰 Features:")
