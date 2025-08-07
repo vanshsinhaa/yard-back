@@ -3,17 +3,26 @@
 CodeInspiration API with Authentication & Real Data
 """
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+import re
+import requests
+from typing import List, Dict, Optional
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from pydantic import BaseModel, Field, validator
 import uvicorn
 import time
-import requests
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import our authentication system
 from auth_system import get_api_key, get_optional_api_key, api_key_manager
+
+# Import database for user management
+from database import db_manager
 
 # Models
 class SearchRequest(BaseModel):
@@ -32,6 +41,32 @@ class SearchResponse(BaseModel):
     plan: str
     usage: dict
 
+class UserRegistrationRequest(BaseModel):
+    user_id: str = Field(..., description="Unique user identifier")
+    email: str = Field(..., description="User email address")
+    plan: str = Field(default="free", description="Plan type: free, pro, enterprise")
+    
+    @validator('email')
+    def validate_email_format(cls, v):
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(pattern, v):
+            raise ValueError("Invalid email format")
+        return v
+
+class UserRegistrationResponse(BaseModel):
+    user_id: str
+    api_key: str
+    plan: str
+    message: str
+    limits: dict
+
+class APIKeyResponse(BaseModel):
+    api_key: str
+    user_id: str
+    plan: str
+    created_at: float
+    limits: dict
+
 # Real GitHub Service (same as before)
 class GitHubService:
     """Fetches REAL GitHub data"""
@@ -42,6 +77,14 @@ class GitHubService:
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "CodeInspiration-API/2.1"
         }
+        
+        # Add GitHub token if available
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token:
+            self.headers["Authorization"] = f"token {github_token}"
+            print("🔑 Using GitHub token for authenticated requests")
+        else:
+            print("⚠️ No GitHub token found - using unauthenticated requests (limited to 60/hour)")
     
     def search_repositories(self, query: str, max_results: int, sort_by: str, min_stars: int, search_mode: str = "active"):
         """Search real GitHub repositories with different modes"""
@@ -72,8 +115,13 @@ class GitHubService:
             }
             
             print(f"🔍 Fetching real GitHub data: {search_query}")
+            print(f"📡 URL: {url}")
+            print(f"📋 Params: {params}")
             
             response = requests.get(url, headers=self.headers, params=params, timeout=10)
+            
+            print(f"📊 Response Status: {response.status_code}")
+            print(f"📊 Response Headers: {dict(response.headers)}")
             
             if response.status_code == 200:
                 data = response.json()
@@ -126,11 +174,19 @@ class GitHubService:
                 return repositories
                 
             else:
-                print(f"⚠️ GitHub API returned {response.status_code}, using fallback")
+                print(f"⚠️ GitHub API returned {response.status_code}")
+                print(f"⚠️ Response content: {response.text[:200]}...")
+                
+                # Check if it's a rate limit error
+                if response.status_code == 403 and "rate limit" in response.text.lower():
+                    print("🚨 GitHub API rate limit exceeded!")
+                    print("💡 Solution: Add GITHUB_TOKEN environment variable for higher limits")
+                
                 return self._get_fallback_repos(query, max_results, search_mode)
                 
         except Exception as e:
             print(f"❌ Error: {e}")
+            print(f"❌ Error type: {type(e).__name__}")
             return self._get_fallback_repos(query, max_results, search_mode)
     
     def _get_fallback_repos(self, query, max_results, search_mode="active"):
@@ -203,10 +259,6 @@ async def root():
             "free": "100 requests/hour, 1,000/month",
             "pro": "1,000 requests/hour, 10,000/month",
             "enterprise": "10,000 requests/hour, 100,000/month"
-        },
-        "demo_keys": {
-            "free": "demo_free_12345",
-            "pro": "pro_key_67890"
         }
     }
 
@@ -252,10 +304,8 @@ async def search_repositories(
     
     search_time = (time.time() - start_time) * 1000
     
-    # Get current usage stats
-    usage_stats = api_key_manager.get_usage_stats(
-        list(api_key_manager.api_keys.keys())[0]  # This would come from the authenticated user
-    )
+    # Get current usage stats for the authenticated user
+    usage_stats = api_key_manager.get_usage_stats(user_data["api_key"])
     
     return SearchResponse(
         query=request.query,
@@ -297,11 +347,86 @@ async def demo_search():
         "message": "This is demo data. Get your API key for real GitHub repositories!"
     }
 
+@app.post("/register", response_model=UserRegistrationResponse)
+async def register_user(request: UserRegistrationRequest):
+    """Register a new user and generate API key"""
+    
+    try:
+        # Generate API key
+        api_key = api_key_manager.generate_api_key(request.user_id, request.email, request.plan)
+        
+        # Get usage limits
+        limits = {
+            "free": {"hour": 100, "month": 1000},
+            "pro": {"hour": 1000, "month": 10000},
+            "enterprise": {"hour": 10000, "month": 100000}
+        }
+        
+        return UserRegistrationResponse(
+            user_id=request.user_id,
+            api_key=api_key,
+            plan=request.plan,
+            message=f"Successfully registered for {request.plan} plan",
+            limits=limits[request.plan]
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": f"Registration failed: {str(e)}",
+                    "code": "REGISTRATION_ERROR"
+                }
+            }
+        )
+
+@app.post("/keys/generate", response_model=APIKeyResponse)
+async def generate_api_key(
+    user_id: str,
+    plan: str = "free",
+    user_data: Dict = Depends(get_api_key)
+):
+    """Generate a new API key for authenticated user"""
+    
+    try:
+        # Generate new API key
+        api_key = api_key_manager.generate_api_key(user_id, plan)
+        
+        # Get key data
+        key_data = db_manager.get_api_key_data(api_key)
+        
+        limits = {
+            "free": {"hour": 100, "month": 1000},
+            "pro": {"hour": 1000, "month": 10000},
+            "enterprise": {"hour": 10000, "month": 100000}
+        }
+        
+        return APIKeyResponse(
+            api_key=api_key,
+            user_id=user_id,
+            plan=plan,
+            created_at=key_data["created_at"],
+            limits=limits[plan]
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": f"API key generation failed: {str(e)}",
+                    "code": "KEY_GENERATION_ERROR"
+                }
+            }
+        )
+
 @app.get("/usage")
 async def get_usage(user_data: Dict = Depends(get_api_key)):
     """Get current API usage statistics"""
     
-    usage_stats = api_key_manager.get_usage_stats("demo_free_12345")  # This would be dynamic
+    # Get usage stats for the authenticated user's API key
+    usage_stats = api_key_manager.get_usage_stats(user_data["api_key"])
     
     return {
         "user_id": user_data["user_id"],
@@ -309,6 +434,52 @@ async def get_usage(user_data: Dict = Depends(get_api_key)):
         "usage": usage_stats,
         "account_created": user_data["created_at"]
     }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
+    import time
+    from app.core.logging import log_api_request
+    
+    start_time = time.time()
+    
+    try:
+        # Check database connection
+        from database import db_manager
+        db_status = "healthy"
+        
+        # Check API key manager
+        from auth_system import api_key_manager
+        auth_status = "healthy"
+        
+        # Check GitHub API (basic check)
+        github_status = "healthy"
+        
+        response_data = {
+            "status": "healthy",
+            "timestamp": time.time(),
+            "services": {
+                "database": db_status,
+                "authentication": auth_status,
+                "github_api": github_status
+            },
+            "version": "1.0.0"
+        }
+        
+        response_time = time.time() - start_time
+        log_api_request("GET", "/health", 200, response_time)
+        
+        return response_data
+        
+    except Exception as e:
+        response_time = time.time() - start_time
+        log_api_request("GET", "/health", 500, response_time)
+        
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": time.time()
+        }, 500
 
 @app.get("/plans")
 async def get_plans():
@@ -361,12 +532,8 @@ if __name__ == "__main__":
     print(f"📚 Docs: http://{host}:{port}/docs")
     print(f"🔍 Health: http://{host}:{port}/health")
     print()
-    print("🔑 Demo API Keys:")
-    print("   FREE: demo_free_12345")
-    print("   PRO:  pro_key_67890")
-    print()
     print("📋 Usage:")
-    print("   Add header: X-API-Key: demo_free_12345")
+    print("   Add header: X-API-Key: your_api_key")
     print("   search_mode: 'active', 'graveyard', or 'all'")
     print()
     print("💰 Features:")
